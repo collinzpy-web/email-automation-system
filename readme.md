@@ -37,3 +37,15 @@ A freelance marketer was sending 500+ follow-up emails manually every week. They
 ```bash
 # Python 3.6+ required
 python --version
+
+
+email-automation-system/
+├── email_automator.py       # Main script
+├── config.json              # Your config 
+├── smtp_credentials.txt     # Your SMTPs 
+├── recipients.csv           # Your recipients 
+├── template.html            # Your template 
+├── send_log.csv             # Generated log 
+├── error_log.txt            # Generated errors
+├── email_system.log         # System logs
+└── README.md                # This file
