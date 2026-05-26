@@ -1,361 +1,397 @@
 #!/usr/bin/env python3
 """
-Email Automation System
-Author: [Your Name]
-Description: High-performance SMTP email sender with threading, template variables,
-             and SMTP rotation. Built for legitimate business email workflows.
+Email Automation System - Sends personalized emails with SMTP rotation.
+No over-engineering. Just works.
 """
 
-import base64
-import datetime
-import json
-import logging
-import math
-import os
-import random
-import smtplib
-import string
 import sys
+import os
+import csv
+import json
 import time
-from email.message import EmailMessage
-from email.mime.application import MIMEApplication
+import smtplib
+import logging
+import argparse
+import threading
+from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from email.utils import formataddr, make_msgid
-from threading import Lock, Thread
-from typing import Dict, List, Optional
-
-# Optional imports with fallbacks
-try:
-    from faker import Faker
-    FAKER_AVAILABLE = True
-except ImportError:
-    FAKER_AVAILABLE = False
-    print("Warning: Faker not installed. Template variables will be limited.")
-
-try:
-    import tldextract
-    TLDEXTRACT_AVAILABLE = True
-except ImportError:
-    TLDEXTRACT_AVAILABLE = False
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='[%(asctime)s] %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/email_automator.log'),
-        logging.StreamHandler()
+        logging.FileHandler('email_system.log'),
+        logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Separate error log
-error_logger = logging.getLogger('errors')
-error_handler = logging.FileHandler('logs/errors.log')
-error_handler.setFormatter(logging.Formatter('[%(asctime)s] %(message)s'))
-error_logger.addHandler(error_handler)
+# Global lock for thread-safe operations
+log_lock = threading.Lock()
+smtp_lock = threading.Lock()
 
+# Global SMTP rotation index
+smtp_index = 0
 
-class EmailAutomationSystem:
-    """Professional email automation system with SMTP rotation and templating."""
+def load_config(config_path='config.json'):
+    """Load configuration from JSON file."""
+    if not os.path.exists(config_path):
+        logger.error(f"Config file not found: {config_path}")
+        sys.exit(1)
     
-    def __init__(self, config_path: str = 'config.json'):
-        self.config_path = config_path
-        self.config = None
-        self.smtp_servers: Dict = {}
-        self.target_emails: List[str] = []
-        self.attachment_path: Optional[str] = None
-        self.letter_path: Optional[str] = None
-        self.lock = Lock()
-        self.email_counter = 0
-        
-        self._load_config()
-        self._setup_directories()
-        self._load_files()
-        
-    def _load_config(self):
-        """Load configuration from JSON file."""
-        if not os.path.exists(self.config_path):
-            self._create_default_config()
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+    
+    # Validate required fields
+    required = ['subject', 'sender_name', 'sender_email']
+    for field in required:
+        if field not in config:
+            logger.error(f"Missing required config field: {field}")
+            sys.exit(1)
+    
+    return config
+
+def load_smtps(smtp_path='smtp_credentials.txt'):
+    """Load SMTP servers from file. Format: host|port|username|password"""
+    if not os.path.exists(smtp_path):
+        logger.error(f"SMTP file not found: {smtp_path}")
+        sys.exit(1)
+    
+    smtps = []
+    with open(smtp_path, 'r') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
             
-        with open(self.config_path, 'r') as f:
-            self.config = json.load(f)
-        logger.info("Configuration loaded")
-    
-    def _create_default_config(self):
-        """Create default configuration template."""
-        default_config = {
-            "smtp_settings": {
-                "thread_count_check": 50,
-                "thread_count_send": 30,
-                "delay_between_emails": 1,
-                "auto_remove_dead_smtps": False
-            },
-            "email_settings": {
-                "subject": "Your personalized message",
-                "sender_name": "Your Name",
-                "sender_email": "your@email.com",
-                "force_smtp_match": False,
-                "force_spoof": False
-            },
-            "template_variables": {
-                "enabled": True,
-                "note": "Use ##variable## in templates. See README for options."
-            },
-            "headers": {}
-        }
-        with open(self.config_path, 'w') as f:
-            json.dump(default_config, f, indent=2)
-        logger.info(f"Created default config at {self.config_path}")
-        print("Please edit config.json before running again.")
-        sys.exit(0)
-    
-    def _setup_directories(self):
-        """Ensure required directories exist."""
-        dirs = ['FILES/EMAILS', 'FILES/LETTER', 'FILES/SMTPS', 'FILES/ATTACHMENT', 'logs']
-        for d in dirs:
-            os.makedirs(d, exist_ok=True)
-    
-    def _load_files(self):
-        """Load emails, template, SMTP credentials, and attachment."""
-        # Load emails
-        email_files = [f for f in os.listdir('FILES/EMAILS') if f.endswith(('.csv', '.txt'))]
-        if not email_files:
-            logger.error("No email list found in FILES/EMAILS/")
-            sys.exit(1)
-        
-        email_path = os.path.join('FILES/EMAILS', email_files[0])
-        with open(email_path, 'r') as f:
-            self.target_emails = [line.strip() for line in f if line.strip()]
-        logger.info(f"Loaded {len(self.target_emails)} target emails")
-        
-        # Load letter template
-        letter_files = [f for f in os.listdir('FILES/LETTER') if f.endswith(('.html', '.txt'))]
-        if not letter_files:
-            logger.error("No letter template found in FILES/LETTER/")
-            sys.exit(1)
-        self.letter_path = os.path.join('FILES/LETTER', letter_files[0])
-        
-        # Load SMTP credentials
-        smtp_files = [f for f in os.listdir('FILES/SMTPS') if f.endswith(('.csv', '.txt'))]
-        if not smtp_files:
-            logger.error("No SMTP credentials found in FILES/SMTPS/")
-            sys.exit(1)
-        self._load_smtp_credentials(os.path.join('FILES/SMTPS', smtp_files[0]))
-        
-        # Load attachment (optional)
-        attachment_files = os.listdir('FILES/ATTACHMENT')
-        if attachment_files:
-            self.attachment_path = os.path.join('FILES/ATTACHMENT', attachment_files[0])
-    
-    def _load_smtp_credentials(self, path: str):
-        """Load and validate SMTP credentials."""
-        with open(path, 'r') as f:
-            lines = [line.strip() for line in f if line.strip()]
-        
-        for line in lines:
             parts = line.split('|')
-            if len(parts) == 4:
-                host, port, user, password = parts
-                self.smtp_servers[user] = {
-                    'host': host,
-                    'port': port,
-                    'user': user,
-                    'password': password,
-                    'server': None
-                }
-        logger.info(f"Loaded {len(self.smtp_servers)} SMTP servers")
+            if len(parts) != 4:
+                logger.warning(f"Line {line_num}: Invalid format (skipped): {line}")
+                continue
+            
+            host, port, username, password = parts
+            smtps.append({
+                'host': host,
+                'port': int(port),
+                'username': username,
+                'password': password,
+                'failed': False
+            })
     
-    def verify_smtp_servers(self):
-        """Test all SMTP connections before sending."""
-        logger.info("Verifying SMTP servers...")
-        live_servers = {}
+    if not smtps:
+        logger.error("No valid SMTP servers found")
+        sys.exit(1)
+    
+    logger.info(f"Loaded {len(smtps)} SMTP servers")
+    return smtps
+
+def load_recipients(recipients_path='recipients.csv'):
+    """Load recipients from CSV. Expects 'email' column, optional 'name' column."""
+    if not os.path.exists(recipients_path):
+        logger.error(f"Recipients file not found: {recipients_path}")
+        sys.exit(1)
+    
+    recipients = []
+    with open(recipients_path, 'r') as f:
+        reader = csv.DictReader(f)
         
-        for user, creds in self.smtp_servers.items():
-            try:
-                server = self._connect_smtp(creds)
-                if server:
-                    creds['server'] = server
-                    live_servers[user] = creds
-                    logger.info(f"✓ SMTP live: {creds['host']}:{creds['port']}")
-                else:
-                    logger.warning(f"✗ SMTP failed: {creds['host']}:{creds['port']}")
-            except Exception as e:
-                error_logger.error(f"SMTP verification failed for {creds['host']}: {e}")
-        
-        self.smtp_servers = live_servers
-        
-        if not self.smtp_servers:
-            logger.error("No live SMTP servers available")
+        if 'email' not in reader.fieldnames:
+            logger.error("CSV must have an 'email' column")
             sys.exit(1)
         
-        logger.info(f"{len(self.smtp_servers)} live SMTP servers ready")
+        for row in reader:
+            email = row.get('email', '').strip().lower()
+            if email:
+                recipients.append({
+                    'email': email,
+                    'name': row.get('name', '').strip()
+                })
     
-    def _connect_smtp(self, creds: Dict):
-        """Establish SMTP connection."""
-        host, port, user, password = creds['host'], creds['port'], creds['user'], creds['password']
+    if not recipients:
+        logger.error("No valid recipients found")
+        sys.exit(1)
+    
+    logger.info(f"Loaded {len(recipients)} recipients")
+    return recipients
+
+def load_template(template_path='template.html'):
+    """Load HTML template from file."""
+    if not os.path.exists(template_path):
+        logger.error(f"Template file not found: {template_path}")
+        sys.exit(1)
+    
+    with open(template_path, 'r') as f:
+        template = f.read()
+    
+    return template
+
+def rotate_smtp(smtps):
+    """Get next SMTP server (round-robin)."""
+    global smtp_index
+    
+    with smtp_lock:
+        # Find next working SMTP
+        for _ in range(len(smtps)):
+            smtp = smtps[smtp_index % len(smtps)]
+            smtp_index += 1
+            
+            if not smtp.get('failed', False):
+                return smtp
         
-        if port == '465':
-            server = smtplib.SMTP_SSL(host, int(port), timeout=15)
+        # All SMTPs failed
+        return None
+
+def test_smtp_connection(smtp):
+    """Test SMTP connection and login."""
+    try:
+        if smtp['port'] == 465:
+            server = smtplib.SMTP_SSL(smtp['host'], smtp['port'], timeout=10)
         else:
-            server = smtplib.SMTP(host, int(port), timeout=15)
+            server = smtplib.SMTP(smtp['host'], smtp['port'], timeout=10)
             server.starttls()
         
-        server.ehlo()
-        server.login(user, password)
-        return server
-    
-    def _replace_variables(self, text: str, email: str, smtp_user: str = '') -> str:
-        """Replace template variables with dynamic content."""
-        if not FAKER_AVAILABLE:
-            # Basic replacements only
-            text = text.replace('##email##', email)
-            text = text.replace('##username##', email.split('@')[0])
-            return text
-        
-        fake = Faker()
-        
-        # Email-based replacements
-        if '##email##' in text:
-            text = text.replace('##email##', email)
-        if '##username##' in text:
-            text = text.replace('##username##', email.split('@')[0])
-        if '##domain##' in text and TLDEXTRACT_AVAILABLE:
-            domain = tldextract.extract(email.split('@')[1]).domain
-            text = text.replace('##domain##', domain)
-        
-        # Date replacements
-        now = datetime.datetime.now()
-        text = text.replace('##current_date##', now.strftime('%Y-%m-%d'))
-        text = text.replace('##current_time##', now.strftime('%H:%M'))
-        text = text.replace('##current_year##', now.strftime('%Y'))
-        
-        # Faker replacements (limited set for professionalism)
-        if '##random_name##' in text:
-            text = text.replace('##random_name##', fake.name())
-        if '##random_city##' in text:
-            text = text.replace('##random_city##', fake.city())
-        
-        return text
-    
-    def _build_message(self, email: str, smtp_creds: Dict):
-        """Build email message with template and optional attachment."""
-        msg = EmailMessage()
-        
-        # Sender and recipient
-        sender_name = self._replace_variables(
-            self.config['email_settings']['sender_name'], email, smtp_creds['user']
-        )
-        sender_email = self.config['email_settings']['sender_email']
-        
-        msg['From'] = formataddr((sender_name, sender_email))
-        msg['To'] = email
-        msg['Subject'] = self._replace_variables(
-            self.config['email_settings']['subject'], email, smtp_creds['user']
-        )
-        
-        # Add custom headers
-        for key, value in self.config.get('headers', {}).items():
-            msg[key] = self._replace_variables(value, email, smtp_creds['user'])
-        
-        # Load and process HTML template
-        with open(self.letter_path, 'r') as f:
-            html_content = f.read()
-        html_content = self._replace_variables(html_content, email, smtp_creds['user'])
-        msg.add_alternative(html_content, subtype='html')
-        
-        # Add attachment if exists
-        if self.attachment_path and os.path.exists(self.attachment_path):
-            with open(self.attachment_path, 'rb') as f:
-                attachment_data = f.read()
-            attachment = MIMEApplication(attachment_data)
-            attachment.add_header(
-                'Content-Disposition', 
-                'attachment', 
-                filename=os.path.basename(self.attachment_path)
-            )
-            msg.attach(attachment)
-        
-        return msg
-    
-    def _send_single_email(self, email: str):
-        """Send one email using round-robin SMTP selection."""
-        smtp_keys = list(self.smtp_servers.keys())
-        smtp_user = smtp_keys[self.email_counter % len(smtp_keys)]
-        smtp_creds = self.smtp_servers[smtp_user]
-        
-        try:
-            msg = self._build_message(email, smtp_creds)
-            
-            # Reconnect if needed
-            if smtp_creds['server'] is None:
-                smtp_creds['server'] = self._connect_smtp(smtp_creds)
-            
-            smtp_creds['server'].send_message(msg)
-            logger.info(f"✓ Sent to {email} via {smtp_creds['host']}")
-            
-        except Exception as e:
-            error_logger.error(f"Failed to send to {email}: {e}")
-            logger.warning(f"✗ Failed to send to {email}")
-            
-            # Try to reconnect on failure
-            try:
-                smtp_creds['server'] = self._connect_smtp(smtp_creds)
-                smtp_creds['server'].send_message(msg)
-                logger.info(f"✓ Retry successful for {email}")
-            except Exception as retry_error:
-                error_logger.error(f"Retry failed for {email}: {retry_error}")
-        
-        with self.lock:
-            self.email_counter += 1
-        
-        # Delay between emails
-        time.sleep(self.config['smtp_settings'].get('delay_between_emails', 1))
-    
-    def run(self):
-        """Main execution method."""
-        print("\n" + "="*60)
-        print("EMAIL AUTOMATION SYSTEM")
-        print("="*60)
-        print(f"Targets: {len(self.target_emails)} emails")
-        print(f"SMTP Servers: {len(self.smtp_servers)}")
-        print(f"Template: {os.path.basename(self.letter_path)}")
-        print("="*60 + "\n")
-        
-        self.verify_smtp_servers()
-        
-        thread_count = self.config['smtp_settings'].get('thread_count_send', 30)
-        thread_count = min(thread_count, len(self.target_emails))
-        
-        logger.info(f"Starting send with {thread_count} threads...")
-        
-        threads = []
-        email_queue = self.target_emails.copy()
-        
-        def worker():
-            while True:
-                try:
-                    email = email_queue.pop()
-                except IndexError:
-                    break
-                self._send_single_email(email)
-        
-        for _ in range(thread_count):
-            t = Thread(target=worker)
-            t.start()
-            threads.append(t)
-        
-        for t in threads:
-            t.join()
-        
-        logger.info(f"Completed. Sent to {self.email_counter} of {len(self.target_emails)} emails")
+        server.login(smtp['username'], smtp['password'])
+        server.quit()
+        return True
+    except Exception as e:
+        logger.warning(f"SMTP test failed for {smtp['host']}: {str(e)}")
+        return False
 
+def personalize_template(template, recipient, config):
+    """Replace template variables with actual values."""
+    replacements = {
+        '{{email}}': recipient['email'],
+        '{{name}}': recipient['name'] if recipient['name'] else 'there',
+        '{{current_date}}': datetime.now().strftime('%B %d, %Y'),
+        '{{current_time}}': datetime.now().strftime('%I:%M %p'),
+        '{{random_id}}': make_msgid()[1:-1][:8]  # first 8 chars of message-id
+    }
+    
+    # Add any custom replacements from config
+    if 'variables' in config:
+        for key, value in config['variables'].items():
+            replacements[f'{{{{{key}}}}}'] = value
+    
+    result = template
+    for placeholder, value in replacements.items():
+        result = result.replace(placeholder, str(value))
+    
+    return result
+
+def send_email(recipient, smtp, config, template):
+    """Send a single email using given SMTP server."""
+    try:
+        # Personalize content
+        subject = personalize_template(config['subject'], recipient, config)
+        html_body = personalize_template(template, recipient, config)
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = formataddr((config['sender_name'], config['sender_email']))
+        msg['To'] = recipient['email']
+        msg['Message-ID'] = make_msgid()
+        
+        # Attach HTML part
+        msg.attach(MIMEText(html_body, 'html'))
+        
+        # Send
+        if smtp['port'] == 465:
+            server = smtplib.SMTP_SSL(smtp['host'], smtp['port'], timeout=15)
+        else:
+            server = smtplib.SMTP(smtp['host'], smtp['port'], timeout=15)
+            server.starttls()
+        
+        server.login(smtp['username'], smtp['password'])
+        server.send_message(msg)
+        server.quit()
+        
+        return True, None
+    
+    except smtplib.SMTPRecipientsRefused as e:
+        return False, f"Recipient refused: {str(e)}"
+    except smtplib.SMTPAuthenticationError as e:
+        return False, f"Auth failed: {str(e)}"
+    except smtplib.SMTPException as e:
+        return False, f"SMTP error: {str(e)}"
+    except Exception as e:
+        return False, f"Unknown error: {str(e)}"
+
+def log_send(recipient_email, smtp_host, status, error_msg=''):
+    """Log email send attempt to CSV."""
+    with log_lock:
+        file_exists = os.path.exists('send_log.csv')
+        
+        with open('send_log.csv', 'a', newline='') as f:
+            writer = csv.writer(f)
+            
+            if not file_exists:
+                writer.writerow(['timestamp', 'recipient', 'smtp', 'status', 'error'])
+            
+            writer.writerow([
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                recipient_email,
+                smtp_host,
+                status,
+                error_msg
+            ])
+
+def log_error(recipient_email, error_msg):
+    """Log error to separate file."""
+    with log_lock:
+        with open('error_log.txt', 'a') as f:
+            f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {recipient_email}: {error_msg}\n")
+
+def process_recipient(recipient, smtps, config, template, max_retries):
+    """Process single recipient with retries and SMTP rotation."""
+    last_error = None
+    
+    for attempt in range(max_retries):
+        smtp = rotate_smtp(smtps)
+        if not smtp:
+            error_msg = "No working SMTP servers available"
+            log_error(recipient['email'], error_msg)
+            log_send(recipient['email'], 'none', 'failed', error_msg)
+            return False
+        
+        success, error = send_email(recipient, smtp, config, template)
+        
+        if success:
+            logger.info(f"✓ Sent to {recipient['email']} via {smtp['host']}")
+            log_send(recipient['email'], smtp['host'], 'sent')
+            return True
+        
+        # Failed, log and retry
+        last_error = error
+        logger.warning(f"✗ Attempt {attempt+1}/{max_retries} failed for {recipient['email']}: {error}")
+        
+        if attempt < max_retries - 1:
+            time.sleep(2)  # Wait before retry
+            # Mark SMTP as failed only after it fails multiple times
+            if attempt >= 1:
+                with smtp_lock:
+                    smtp['failed'] = True
+                    logger.warning(f"Marked {smtp['host']} as failed")
+    
+    # All retries exhausted
+    log_error(recipient['email'], last_error)
+    log_send(recipient['email'], 'unknown', 'failed', last_error)
+    logger.error(f"✗ Failed to send to {recipient['email']} after {max_retries} attempts")
+    return False
 
 def main():
-    """Entry point."""
-    automator = EmailAutomationSystem()
-    automator.run()
+    parser = argparse.ArgumentParser(description='Email Automation System')
+    parser.add_argument('--config', default='config.json', help='Config file path')
+    parser.add_argument('--dry-run', action='store_true', help='Preview only, no actual sends')
+    parser.add_argument('--test', action='store_true', help='Send to first 5 recipients only')
+    args = parser.parse_args()
+    
+    print("\n" + "=" * 50)
+    print("EMAIL AUTOMATION SYSTEM")
+    print("=" * 50 + "\n")
+    
+    # Load configuration
+    config = load_config(args.config)
+    
+    # Override with command line flags
+    if args.dry_run:
+        config['dry_run'] = True
+    
+    # Load SMTPs and test them
+    smtps = load_smtps()
+    
+    print("Testing SMTP connections...")
+    working_smtps = []
+    for smtp in smtps:
+        if test_smtp_connection(smtp):
+            working_smtps.append(smtp)
+            print(f"  ✓ {smtp['host']}:{smtp['port']}")
+        else:
+            print(f"  ✗ {smtp['host']}:{smtp['port']} - failed")
+    
+    if not working_smtps:
+        logger.error("No working SMTP servers found")
+        sys.exit(1)
+    
+    smtps = working_smtps
+    logger.info(f"Using {len(smtps)} working SMTP servers")
+    
+    # Load recipients and template
+    recipients = load_recipients()
+    template = load_template()
+    
+    if args.test:
+        recipients = recipients[:5]
+        print(f"\n🧪 TEST MODE: Sending to first {len(recipients)} recipients")
+    
+    if config.get('dry_run'):
+        print(f"\n🧪 DRY RUN MODE: No emails will be sent")
+        print(f"   Would send {len(recipients)} emails using {len(smtps)} SMTP servers")
+        print(f"   Subject: {config['subject']}")
+        print(f"   From: {config['sender_name']} <{config['sender_email']}>")
+        print(f"   Delay: {config.get('delay_between_emails', 2)}s between emails")
+        print(f"   Retries: {config.get('max_retries', 3)} per email")
+        print(f"   Threads: {config.get('thread_count', 5)}")
+        print("\n✅ Dry run complete. Remove --dry-run to send real emails.")
+        return
+    
+    # Send emails
+    print(f"\n📧 Sending {len(recipients)} emails...")
+    print(f"   Using {len(smtps)} SMTP servers (round-robin)")
+    print(f"   Delay: {config.get('delay_between_emails', 2)}s between sends")
+    print("-" * 40 + "\n")
+    
+    # Use threading for concurrent sends
+    max_threads = config.get('thread_count', 5)
+    success_count = 0
+    fail_count = 0
+    results_lock = threading.Lock()
+    
+    def worker(recipient):
+        nonlocal success_count, fail_count
+        result = process_recipient(
+            recipient, smtps, config, template,
+            config.get('max_retries', 3)
+        )
+        
+        with results_lock:
+            if result:
+                success_count += 1
+            else:
+                fail_count += 1
+        
+        # Respect delay
+        time.sleep(config.get('delay_between_emails', 2))
+    
+    # Process with thread pool
+    threads = []
+    for recipient in recipients:
+        if len(threads) >= max_threads:
+            for t in threads:
+                t.join()
+            threads = []
+        
+        t = threading.Thread(target=worker, args=(recipient,))
+        t.start()
+        threads.append(t)
+    
+    # Wait for remaining threads
+    for t in threads:
+        t.join()
+    
+    # Final summary
+    print("\n" + "=" * 50)
+    print("📊 FINAL SUMMARY")
+    print("=" * 50)
+    print(f"Total recipients: {len(recipients)}")
+    print(f"✓ Sent: {success_count}")
+    print(f"✗ Failed: {fail_count}")
+    print(f"📁 Logs: send_log.csv, error_log.txt, email_system.log")
+    print("\n✅ Done.\n")
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
