@@ -1,0 +1,31 @@
+{
+    "smtp_settings": {
+        "thread_count_check": 50,
+        "thread_count_send": 30,
+        "delay_between_emails": 1,
+        "auto_remove_dead_smtps": false
+    },
+    "email_settings": {
+        "subject": "Hello ##username##, your personalized message",
+        "sender_name": "Your Company Name",
+        "sender_email": "hello@yourcompany.com",
+        "force_smtp_match": false,
+        "force_spoof": false
+    },
+    "template_variables": {
+        "enabled": true,
+        "available_variables": [
+            "##email##",
+            "##username##", 
+            "##domain##",
+            "##current_date##",
+            "##current_time##",
+            "##current_year##",
+            "##random_name##",
+            "##random_city##"
+        ]
+    },
+    "headers": {
+        "X-Mailer": "EmailAutomationSystem v2.0"
+    }
+}
