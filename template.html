@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background: #f4f4f4; padding: 10px; text-align: center; }
+        .footer { font-size: 12px; color: #777; margin-top: 20px; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2>Hello {{name}}!</h2>
+        </div>
+        
+        <p>This is a personalized message for <strong>{{email}}</strong>.</p>
+        
+        <p>Today is {{current_date}} at {{current_time}}.</p>
+        
+        <p>Your unique reference: <code>{{random_id}}</code></p>
+        
+        <p>Best regards,<br>
+        {{company}} Team</p>
+        
+        <div class="footer">
+            <p>If you wish to unsubscribe, click <a href="{{unsubscribe_link}}">here</a>.</p>
+        </div>
+    </div>
+</body>
+</html>
